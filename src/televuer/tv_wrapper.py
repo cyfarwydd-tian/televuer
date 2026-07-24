@@ -194,8 +194,8 @@ class TeleData:
     right_hand_squeeze: bool = False       # True if hand is making a fist
     right_hand_squeezeValue: float = 0.0   # (0.0 → 1.0) degree of hand squeeze
 
-    motion_data_ready: bool = False        # True after the first hand or controller motion data event is received
-    motion_data_timestamp: float = 0.0     # monotonic time of the latest valid motion event
+    motion_data_ready: bool = False        # True when the latest hand/controller event produced a usable snapshot
+    motion_data_timestamp: float = 0.0     # monotonic time of the latest parsed motion event
     # controller tracking
     # https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html
     # https://immersive-web.github.io/webxr-gamepads-module/
@@ -224,6 +224,11 @@ class TeleData:
     right_ctrl_bButton: bool = False       # True if B button is pressed
     right_ctrl_thumbstick: bool = False    # True if thumbstick button is pressed
     right_ctrl_thumbstickValue: np.ndarray = field(default_factory=lambda: np.zeros(2)) # 2D vector (x, y), normalized
+    # Snapshot metadata is appended to preserve the positional order of the
+    # pre-existing hand/controller fields.
+    head_pose_valid: bool = False          # validity of the head pose used in this TeleData snapshot
+    left_wrist_pose_valid: bool = False    # validity of the left wrist pose used in this TeleData snapshot
+    right_wrist_pose_valid: bool = False   # validity of the right wrist pose used in this TeleData snapshot
 
 
 class TeleVuerWrapper:
@@ -283,6 +288,19 @@ class TeleVuerWrapper:
                               cert_file=cert_file, key_file=key_file)
         
     def get_tele_data(self):
+        """Return one coherent snapshot of the shared XR motion state."""
+        snapshot_lock = self.tvuer.motion_snapshot_lock
+        if not snapshot_lock.acquire(timeout=0.25):
+            raise TimeoutError(
+                "Timed out acquiring the TeleVuer motion snapshot lock; "
+                "the XR server process may have stopped during a frame update."
+            )
+        try:
+            return self._get_tele_data_locked()
+        finally:
+            snapshot_lock.release()
+
+    def _get_tele_data_locked(self):
         """
         Get processed motion state data from the TeleVuer instance.
 
@@ -406,6 +424,9 @@ class TeleVuerWrapper:
                 right_hand_rot=right_Brobot_arm_hand_rot,
                 motion_data_ready=self.tvuer.motion_data_ready,
                 motion_data_timestamp=self.tvuer.motion_data_timestamp,
+                head_pose_valid=head_pose_is_valid,
+                left_wrist_pose_valid=left_arm_is_valid,
+                right_wrist_pose_valid=right_arm_is_valid,
                 left_hand_pinch=self.tvuer.left_hand_pinch,
                 left_hand_pinchValue=self.tvuer.left_hand_pinchValue * 100.0,
                 left_hand_squeeze=self.tvuer.left_hand_squeeze,
@@ -438,6 +459,9 @@ class TeleVuerWrapper:
                 right_wrist_pose=right_IPunitree_Brobot_waist_arm,
                 motion_data_ready=self.tvuer.motion_data_ready,
                 motion_data_timestamp=self.tvuer.motion_data_timestamp,
+                head_pose_valid=head_pose_is_valid,
+                left_wrist_pose_valid=left_arm_is_valid,
+                right_wrist_pose_valid=right_arm_is_valid,
                 left_ctrl_trigger=self.tvuer.left_ctrl_trigger,
                 left_ctrl_triggerValue=10.0 - self.tvuer.left_ctrl_triggerValue * 10,
                 left_ctrl_squeeze=self.tvuer.left_ctrl_squeeze,

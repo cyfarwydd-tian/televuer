@@ -1,6 +1,6 @@
 from vuer import Vuer
 from vuer.schemas import ImageBackground, Hands, MotionControllers, WebRTCVideoPlane, WebRTCStereoVideoPlane
-from multiprocessing import Value, Array, Process, shared_memory
+from multiprocessing import Value, Array, Process, Lock, shared_memory
 import numpy as np
 import asyncio
 import threading
@@ -141,6 +141,9 @@ class TeleVuer:
         self.right_arm_pose_shared = Array('d', 16, lock=True)
         self.motion_data_ready_shared = Value('b', False, lock=True)
         self.motion_data_timestamp_shared = Value('d', 0.0, lock=True)
+        # Writers and TeleVuerWrapper.get_tele_data() take this outer lock
+        # before the per-field locks, giving readers one coherent XR snapshot.
+        self.motion_snapshot_lock = Lock()
         if self.use_hand_tracking:
             self.left_hand_position_shared = Array('d', 75, lock=True)
             self.right_hand_position_shared = Array('d', 75, lock=True)
@@ -222,14 +225,28 @@ class TeleVuer:
                 pass
 
     async def on_cam_move(self, event, session, fps=60):
+        self.motion_snapshot_lock.acquire()
         try:
             with self.head_pose_shared.get_lock():
                 self.head_pose_shared[:] = event.value["camera"]["matrix"]
         except:
-            pass
+            # A malformed camera update must not leave a previously valid head
+            # pose looking current to the safety gate.
+            with self.head_pose_shared.get_lock():
+                self.head_pose_shared[:] = [0.0] * 16
+        finally:
+            self.motion_snapshot_lock.release()
+
+    def _invalidate_motion_event(self):
+        """Prevent a partially written hand/controller event from being consumed."""
+        with self.motion_data_ready_shared.get_lock():
+            self.motion_data_ready_shared.value = False
+        with self.motion_data_timestamp_shared.get_lock():
+            self.motion_data_timestamp_shared.value = 0.0
 
     async def on_controller_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/20_motion_controllers.html"""
+        self.motion_snapshot_lock.acquire()
         try:
             # ControllerData
             with self.left_arm_pose_shared.get_lock():
@@ -269,10 +286,13 @@ class TeleVuer:
             with self.motion_data_timestamp_shared.get_lock():
                 self.motion_data_timestamp_shared.value = time.monotonic()
         except:
-            pass
+            self._invalidate_motion_event()
+        finally:
+            self.motion_snapshot_lock.release()
 
     async def on_hand_move(self, event, session, fps=60):
         """https://docs.vuer.ai/en/latest/examples/19_hand_tracking.html"""
+        self.motion_snapshot_lock.acquire()
         try:
             # HandsData
             left_hand_data = event.value["left"]
@@ -320,7 +340,9 @@ class TeleVuer:
                 self.motion_data_timestamp_shared.value = time.monotonic()
 
         except:
-            pass
+            self._invalidate_motion_event()
+        finally:
+            self.motion_snapshot_lock.release()
     
     ## immersive MODE
     async def main_image_binocular_zmq(self, session):
@@ -877,7 +899,7 @@ class TeleVuer:
 
     @property
     def motion_data_ready(self):
-        """bool, whether at least one hand or controller motion data event has been received."""
+        """Whether the latest hand/controller event was parsed into a usable snapshot."""
         with self.motion_data_ready_shared.get_lock():
             return self.motion_data_ready_shared.value
 
