@@ -14,7 +14,8 @@ from typing import Literal
 class TeleVuer:
     def __init__(self, use_hand_tracking: bool, binocular: bool=True, img_shape: tuple=None, display_fps: float=30.0,
                        display_mode: Literal["immersive", "pass-through", "ego"]="immersive", zmq: bool=False, webrtc: bool=False, webrtc_url: str=None, 
-                       cert_file: str=None, key_file: str=None):
+                       cert_file: str=None, key_file: str=None, server_host: str="0.0.0.0",
+                       server_port: int=8012):
         """
         TeleVuer class for OpenXR-based XR teleoperate applications.
         This class handles the communication with the Vuer server and manages image and pose data.
@@ -30,6 +31,8 @@ class TeleVuer:
         :param webrtc_url: str, URL for the webrtc offer. must be provided if webrtc is True.
         :param cert_file: str, path to the SSL certificate file.
         :param key_file: str, path to the SSL key file.
+        :param server_host: str, local address on which the Vuer server listens.
+        :param server_port: int, local HTTPS/WebSocket port for Vuer.
 
         Note:
 
@@ -89,7 +92,10 @@ class TeleVuer:
                     cert_file = cert_file or str(current_module_dir / "cert.pem")
                     key_file = key_file or str(current_module_dir / "key.pem")
 
-        self.vuer = Vuer(host='0.0.0.0', cert=cert_file, key=key_file, queries=dict(grid=False), queue_len=3)
+        server_port = int(server_port)
+        if not 1 <= server_port <= 65535:
+            raise ValueError("[TeleVuer] server_port must be between 1 and 65535.")
+        self.vuer = Vuer(host=server_host, port=server_port, cert=cert_file, key=key_file, queries=dict(grid=False), queue_len=3)
         self.vuer.add_handler("CAMERA_MOVE")(self.on_cam_move)
         if self.use_hand_tracking:
             self.vuer.add_handler("HAND_MOVE")(self.on_hand_move)

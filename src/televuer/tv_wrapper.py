@@ -235,7 +235,9 @@ class TeleVuerWrapper:
     def __init__(self, use_hand_tracking: bool, binocular: bool=True, img_shape: tuple=(480, 1280), display_fps: float=30.0,
                        display_mode: Literal["immersive", "pass-through", "ego"]="immersive", zmq: bool=False, webrtc: bool=False, webrtc_url: str=None, 
                        cert_file: str=None, key_file: str=None, return_hand_rot_data: bool=False,
-                       arm_reference_mode: Literal["head_position", "head_yaw"]="head_yaw"):
+                       arm_reference_mode: Literal["head_position", "head_yaw"]="head_yaw",
+                       server_host: str="0.0.0.0", server_port: int=8012,
+                       motion_snapshot_lock_timeout_s: float=0.25):
         """
         TeleVuerWrapper is a wrapper for the TeleVuer class, which handles XR device's data suit for robot control.
         It initializes the TeleVuer instance with the specified parameters and provides a method to get motion state data.
@@ -254,6 +256,10 @@ class TeleVuerWrapper:
         :param arm_reference_mode: str, controls how wrist poses are expressed for IK.
             * "head_position": transfer from WORLD to HEAD with translation adjustment only.
             * "head_yaw": default mode; transfer from WORLD to HEAD with R_Brobot_world_head_yaw^T, ignoring pitch/roll.
+        :param server_host: str, local address on which the Vuer server listens.
+        :param server_port: int, local HTTPS/WebSocket port for Vuer.
+        :param motion_snapshot_lock_timeout_s: float, bounded wait for one coherent
+            cross-process motion snapshot.
 
         Note:
 
@@ -283,14 +289,24 @@ class TeleVuerWrapper:
         self.use_hand_tracking = use_hand_tracking
         self.return_hand_rot_data = return_hand_rot_data
         self.arm_reference_mode = arm_reference_mode
+        self.motion_snapshot_lock_timeout_s = float(motion_snapshot_lock_timeout_s)
+        if (
+            not np.isfinite(self.motion_snapshot_lock_timeout_s)
+            or self.motion_snapshot_lock_timeout_s <= 0.0
+        ):
+            raise ValueError(
+                "[TeleVuerWrapper] motion_snapshot_lock_timeout_s must be finite and positive."
+            )
         self.tvuer = TeleVuer(use_hand_tracking=use_hand_tracking, binocular=binocular, img_shape=img_shape, display_fps=display_fps,
                               display_mode=display_mode, zmq=zmq, webrtc=webrtc, webrtc_url=webrtc_url, 
-                              cert_file=cert_file, key_file=key_file)
+                              cert_file=cert_file, key_file=key_file,
+                              server_host=server_host, server_port=server_port)
         
     def get_tele_data(self):
         """Return one coherent snapshot of the shared XR motion state."""
         snapshot_lock = self.tvuer.motion_snapshot_lock
-        if not snapshot_lock.acquire(timeout=0.25):
+        lock_timeout = getattr(self, "motion_snapshot_lock_timeout_s", 0.25)
+        if not snapshot_lock.acquire(timeout=lock_timeout):
             raise TimeoutError(
                 "Timed out acquiring the TeleVuer motion snapshot lock; "
                 "the XR server process may have stopped during a frame update."
